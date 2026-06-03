@@ -16,10 +16,14 @@ PREPARE_COMMANDS=(
     "DISTRO=ubuntu docker-compose -f workloads/docker-compose.yml build"
 )
 
-# Array of commands to measure. EnergiBridge will measure from the beginning of each command until it exits.
+# Array of configurations to measure.
+# Format:
+#   "friendly-name:::command to execute"
+# If no friendly name is provided, the whole string is treated as the command.
+# EnergiBridge will measure from the beginning of each command until it exits.
 COMMANDS=(
-    "DISTRO=alpine docker-compose -f workloads/docker-compose.yml up  --abort-on-container-exit"
-    "DISTRO=ubuntu docker-compose -f workloads/docker-compose.yml up  --abort-on-container-exit"
+	"alpine:::DISTRO=alpine docker-compose -f workloads/docker-compose.yml up  --abort-on-container-exit"
+	"ubuntu:::DISTRO=ubuntu docker-compose -f workloads/docker-compose.yml up  --abort-on-container-exit"
 )
 
 #########################
@@ -28,6 +32,7 @@ COMMANDS=(
 
 WARMUP_SECONDS=${WARMUP_SECONDS:-10}
 SAMPLE_INTERVAL_MS=${SAMPLE_INTERVAL_MS:-100}
+PAUSE_BETWEEN_RUNS=${PAUSE_BETWEEN_RUNS:-30}
 OUTPUT_ROOT=${OUTPUT_ROOT:-results}
 EXPERIMENT_ID=${EXPERIMENT_ID:-"experiment-$(date +%Y%m%d-%H%M%S)"}
 ENERGIBRIDGE_BIN=${ENERGIBRIDGE_BIN:-energibridge}
@@ -44,11 +49,23 @@ sanitize_name() {
 	local raw="$1"
 	local cleaned
 	cleaned="$(echo "$raw" | tr '[:space:]/' '__' | tr -cd '[:alnum:]_.-')"
+	cleaned="$(echo "$cleaned" | sed -E 's/[_\.-]+$//; s/^[_\.-]+//')"
 	cleaned="${cleaned:0:40}"
 	if [[ -z "$cleaned" ]]; then
 		cleaned="cmd"
 	fi
 	echo "$cleaned"
+}
+
+parse_config_entry() {
+	local entry="$1"
+	if [[ "$entry" == *":::"* ]]; then
+		CONFIG_ENTRY_NAME="${entry%%:::*}"
+		CONFIG_ENTRY_COMMAND="${entry#*:::}"
+	else
+		CONFIG_ENTRY_NAME=""
+		CONFIG_ENTRY_COMMAND="$entry"
+	fi
 }
 
 warmup_cpu() {
@@ -105,27 +122,44 @@ if ! [[ "$NUM_REPETITIONS" =~ ^[0-9]+$ ]] || [[ "$NUM_REPETITIONS" -lt 1 ]]; the
 	exit 1
 fi
 
+if ! [[ "$PAUSE_BETWEEN_RUNS" =~ ^[0-9]+$ ]]; then
+	echo "Error: PAUSE_BETWEEN_RUNS must be a non-negative integer."
+	exit 1
+fi
+
 RUN_ROOT="${OUTPUT_ROOT}/${EXPERIMENT_ID}"
 mkdir -p "$RUN_ROOT"
 
 declare -a CONFIG_DIRS=()
+declare -a CONFIG_DISPLAY_NAMES=()
 declare -a SCHEDULE=()
 
 echo "Preparing experiment at: $RUN_ROOT"
 
 for idx in "${!COMMANDS[@]}"; do
-	cmd="${COMMANDS[$idx]}"
+	parse_config_entry "${COMMANDS[$idx]}"
+	cmd="$CONFIG_ENTRY_COMMAND"
 	config_label="config-$(printf '%02d' "$((idx + 1))")"
-	config_slug="$(sanitize_name "$cmd")"
+	config_name="$CONFIG_ENTRY_NAME"
+	if [[ -n "$config_name" ]]; then
+		config_slug="$(sanitize_name "$config_name")"
+		config_display_name="$config_name"
+	else
+		config_slug="$(sanitize_name "$cmd")"
+		config_display_name="$config_label"
+	fi
 	config_dir="${RUN_ROOT}/${config_label}__${config_slug}"
 
 	CONFIG_DIRS[idx]="$config_dir"
+	CONFIG_DISPLAY_NAMES[idx]="$config_display_name"
 	mkdir -p "$config_dir"
 
 	{
 		echo "CONFIG_INDEX=$idx"
+		echo "CONFIG_NAME=$config_display_name"
 		echo "COMMAND=$cmd"
 		echo "NUM_REPETITIONS=$NUM_REPETITIONS"
+		echo "PAUSE_BETWEEN_RUNS=$PAUSE_BETWEEN_RUNS"
 		echo "SAMPLE_INTERVAL_MS=$SAMPLE_INTERVAL_MS"
 	} >"${config_dir}/config.txt"
 
@@ -150,10 +184,16 @@ for item in "${SHUFFLED_SCHEDULE[@]}"; do
 	rep="${item##*:}"
 	cmd="${COMMANDS[$idx]}"
 	config_dir="${CONFIG_DIRS[$idx]}"
+	config_name="${CONFIG_DISPLAY_NAMES[$idx]}"
 	csv_path="${config_dir}/run-$(printf '%03d' "$rep").csv"
 
-	echo "[$run_number/$total_runs] config=$((idx + 1)) repetition=$rep"
+	echo "[$run_number/$total_runs] config=${config_name} repetition=$rep"
 	"$ENERGIBRIDGE_BIN" -i "$SAMPLE_INTERVAL_MS" -o "$csv_path" -- bash -lc "$cmd"
+
+	if [[ "$run_number" -lt "$total_runs" ]] && [[ "$PAUSE_BETWEEN_RUNS" -gt 0 ]]; then
+		echo "Pausing ${PAUSE_BETWEEN_RUNS}s before next run..."
+		sleep "$PAUSE_BETWEEN_RUNS"
+	fi
 done
 
 echo "Done. Results written to: $RUN_ROOT"
