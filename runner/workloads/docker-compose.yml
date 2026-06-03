@@ -1,0 +1,31 @@
+services:
+    redis-server:
+        image: redis-server-${DISTRO}
+        container_name: redis-server
+        cpuset: "0"
+        build:
+            context: '${PWD}/workloads/'
+            dockerfile: '$PWD/workloads/Dockerfile.${DISTRO}'
+            network: host
+        ports:
+            - '6379:6379'
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 10s
+            retries: 20
+            start_period: 5s
+            timeout: 10s
+    client:
+        image: redis-benchmark
+        cpuset: "5"
+        build:
+            context: '${PWD}/workloads'
+            dockerfile: '${PWD}/workloads/Dockerfile.client'
+            args:
+                - REQUESTS=1000000
+                - KEYSPACE=100000
+            network: host
+        network_mode: host
+        depends_on:
+            redis-server:
+                condition: service_healthy
