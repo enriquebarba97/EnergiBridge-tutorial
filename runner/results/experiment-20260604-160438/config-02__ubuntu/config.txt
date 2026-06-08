@@ -1,0 +1,6 @@
+CONFIG_INDEX=1
+CONFIG_NAME=ubuntu
+COMMAND=DISTRO=ubuntu docker-compose -f workloads/docker-compose.yml up  --abort-on-container-exit
+NUM_REPETITIONS=30
+PAUSE_BETWEEN_RUNS=30
+SAMPLE_INTERVAL_MS=100
